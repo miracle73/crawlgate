@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-agent = ["anthropic>=1.0"]
+agent = ["openai>=1.40"]
 
 [project.urls]
 Homepage = "https://github.com/miracle73/crawlgate"

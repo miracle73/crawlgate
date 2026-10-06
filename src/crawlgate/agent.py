@@ -7,7 +7,9 @@ The agent proposes; code validates every edit; people review the PR; the gate re
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -18,7 +20,8 @@ from pydantic import BaseModel, Field
 from .models import Report, Severity
 
 log = logging.getLogger("crawlgate.agent")
-MODEL = "claude-opus-5-5"
+MODEL = "anthropic/claude-sonnet-4.5"
+BASE_URL = "https://openrouter.ai/api/v1"
 
 # Rules a text edit to page source can plausibly fix. og:image needs an asset, so it's excluded.
 FIXABLE = frozenset({
@@ -41,7 +44,8 @@ Each edit replaces `old_string` with `new_string` in one of the provided files. 
 exactly from that file and occur in it exactly once. Change only what the finding requires; keep formatting.
 Never weaken a check: don't remove pages from sitemaps or hide content to make a finding disappear, and don't
 invent facts (prices, dates, authors) for JSON-LD. If a field needs information you don't have, skip it.
-If a finding can't be fixed safely from these files (for example a noindex that looks intentional), add it to
+Every finding goes in exactly one place: as an edit's `rule`, in another edit's `also_fixes`, or in `skipped`.
+`skipped` means genuinely not fixed. If a finding can't be fixed safely from these files (for example a noindex that looks intentional), add it to
 `skipped` with a one-line reason instead of guessing. A reviewer will read every edit."""
 
 
@@ -52,6 +56,7 @@ class Edit(BaseModel):
     rule: str
     url: str
     rationale: str = Field(description="One sentence for the PR description")
+    also_fixes: list[str] = Field(description="Other finding rules on the same URL this edit resolves; [] if none")
 
 
 class Skip(BaseModel):
@@ -63,6 +68,16 @@ class Skip(BaseModel):
 class Proposal(BaseModel):
     edits: list[Edit]
     skipped: list[Skip]
+
+
+class ProposeError(RuntimeError):
+    """The model call failed, was refused, or returned output that breaks the contract. Nothing is applied."""
+
+
+class Result(BaseModel):
+    proposal: Proposal
+    model_requested: str
+    model_used: str  # as reported by the provider; recorded in the PR body
 
 
 class Rejected(BaseModel):
@@ -120,29 +135,64 @@ def _prompt(r: Report, findings: list, files: list[Path], repo: Path) -> str:
     return "\n".join(lines)
 
 
-def propose(r: Report, repo: Path, client=None, model: str = MODEL) -> tuple[Proposal, list[Path]]:
+def _strict(schema: dict) -> dict:
+    """Pydantic schema -> strict JSON schema (no extra keys, everything required)."""
+    if schema.get("type") == "object":
+        schema["additionalProperties"] = False
+        schema["required"] = list(schema.get("properties", {}))
+    for v in list(schema.get("properties", {}).values()) + list(schema.get("$defs", {}).values()):
+        _strict(v)
+    if "items" in schema:
+        _strict(schema["items"])
+    return schema
+
+
+def _client():
+    from openai import OpenAI
+
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        raise ProposeError("OPENROUTER_API_KEY is not set")
+    return OpenAI(base_url=BASE_URL, api_key=key, max_retries=0, timeout=300)
+
+
+def propose(r: Report, repo: Path, client=None, model: str = MODEL) -> tuple[Result, list[Path]]:
+    """One model call. No fallback model, no retry on refusal: if it doesn't work, say so and stop."""
     findings = fixable(r)
     files = locate(r, findings, repo)
+    empty = Result(proposal=Proposal(edits=[], skipped=[]), model_requested=model, model_used="(not called)")
     if not findings or not files:
-        return Proposal(edits=[], skipped=[]), files
-    if client is None:
-        import anthropic
-
-        client = anthropic.Anthropic()
-    resp = client.beta.messages.parse(
-        model=model,
-        max_tokens=16000,
-        system=SYSTEM,
-        output_config={"effort": "high"},
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
-        messages=[{"role": "user", "content": _prompt(r, findings, files, repo)}],
-        output_format=Proposal,
-    )
-    if resp.stop_reason == "refusal" or resp.parsed_output is None:
-        log.warning("no proposal", extra={"stop_reason": resp.stop_reason})
-        return Proposal(edits=[], skipped=[]), files
-    return resp.parsed_output, files
+        return empty, files
+    client = client or _client()
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=16000,
+            temperature=0,
+            messages=[{"role": "system", "content": SYSTEM},
+                      {"role": "user", "content": _prompt(r, findings, files, repo)}],
+            response_format={"type": "json_schema", "json_schema": {
+                "name": "proposal", "strict": True, "schema": _strict(Proposal.model_json_schema())}},
+        )
+    except Exception as e:  # noqa: BLE001 - surface any transport/API error verbatim, then stop
+        raise ProposeError(f"model call failed: {type(e).__name__}: {e}") from e
+    if not resp.choices:
+        raise ProposeError("model returned no choices")
+    choice = resp.choices[0]
+    used = getattr(resp, "model", None) or "(unknown)"
+    if getattr(choice.message, "refusal", None):
+        raise ProposeError(f"{used} refused: {choice.message.refusal}")
+    if choice.finish_reason not in ("stop", None):
+        raise ProposeError(f"{used} stopped with finish_reason={choice.finish_reason!r}; output not trusted")
+    raw = choice.message.content or ""
+    try:
+        proposal = Proposal.model_validate(json.loads(raw))
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ProposeError(
+            f"{used} returned output that does not match the Proposal schema: {e}\n---\n{raw[:2000]}"
+        ) from e
+    log.info("proposal", extra={"model_requested": model, "model_used": used, "edits": len(proposal.edits)})
+    return Result(proposal=proposal, model_requested=model, model_used=used), files
 
 
 def validate(p: Proposal, repo: Path, allowed: list[Path]) -> tuple[list[Edit], list[Rejected]]:
@@ -181,11 +231,13 @@ def apply(edits: list[Edit], repo: Path) -> list[str]:
     return sorted(set(touched))
 
 
-def pr_body(r: Report, edits: list[Edit], rejected: list[Rejected], skipped: list[Skip]) -> str:
+def pr_body(res: Result, edits: list[Edit], rejected: list[Rejected]) -> str:
+    skipped = res.proposal.skipped
     out = ["Drafted by `crawlgate propose` from a failing crawlgate report. **Review every line.**",
+           f"Model: requested `{res.model_requested}`, answered by `{res.model_used}` (via OpenRouter, no fallback).",
            "This PR does not change the gate's verdict; the crawlgate check re-runs on it and decides.", "",
            "| rule | url | change |", "|---|---|---|"]
-    out += [f"| `{e.rule}` | {e.url} | {e.rationale} |" for e in edits]
+    out += [f"| `{e.rule}`{''.join(f', `{r}`' for r in e.also_fixes)} | {e.url} | {e.rationale} |" for e in edits]
     if skipped or rejected:
         out += ["", "**Not fixed:**", ""]
         out += [f"- `{s.rule}` {s.url}: {s.reason}" for s in skipped]

@@ -32,6 +32,7 @@ class Config(BaseModel):
     production_hosts: list[str] = Field(default_factory=list)  # default: host of base URL
     noindex_allowed: list[str] = Field(default_factory=list)  # regexes of routes allowed to be noindex
     ignore_x_robots_tag: bool = False  # preview deployments often send X-Robots-Tag: noindex
+    agent_model: str = "anthropic/claude-sonnet-4.5"  # crawlgate propose (OpenRouter model id)
     severity: dict[str, str] = Field(default_factory=dict)  # upgrades only
     lighthouse: CwvBudget = Field(default_factory=CwvBudget)
 

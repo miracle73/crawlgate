@@ -98,20 +98,33 @@ Now the budget is explicit (`max_verify`) and prioritised by what matters most: 
 
 ## Optional: drafted fixes (`crawlgate propose`)
 
-This is separate from the gate. It reads a failing `report.json`, finds the source files behind the failing pages, and asks Claude (`claude-opus-5-5`, structured output) for minimal edits: a corrected canonical, a removed stray `noindex`, a valid JSON-LD block.
+This is separate from the gate. It reads a failing `report.json`, finds the source files behind the failing pages, and asks a model (through OpenRouter, default `anthropic/claude-sonnet-4.5`) for minimal edits as structured JSON.
 
 ```bash
 pip install "seogate[agent]"
-crawlgate propose report.json --repo .              # writes crawlgate-fix.md, edits the working tree
-crawlgate propose report.json --repo . --open-pr    # commits to a crawlgate/* branch, opens a draft PR
+export OPENROUTER_API_KEY=...
+crawlgate propose report.json --repo .                       # writes crawlgate-fix.md, edits the working tree
+crawlgate propose report.json --repo . --open-pr             # commits to a crawlgate/* branch, opens a draft PR
+crawlgate propose report.json --repo . --model openai/gpt-5  # or set agent_model in crawlgate.toml
 ```
 
 The agent proposes, code and people decide:
 
-- Every edit is checked in code before it touches a file. It must target a file the model was shown, its `old_string` must match exactly once, and the rule must be text-fixable. A missing og:image needs an asset, so it is never "fixed" with a guessed URL.
-- The baseline, `crawlgate.toml`, `.github/` and the action are never shown to the model and can't be edited.
-- It opens a **draft** PR from a fresh `crawlgate/*` branch and never pushes to the base branch. The crawlgate check re-runs on that PR and decides whether the fix worked.
-- The gate never imports the agent. A test enforces this.
+- **No silent model swap.** One call, no fallback model, no retries. A refusal, error, truncated output, or a response that doesn't validate against the `Proposal` Pydantic model stops the run with exit code 2 and applies nothing. The PR body records both the requested model and the model that actually answered.
+- **Every edit is checked in code.** It must target a file the model was shown, match exactly once, and fix a rule a text edit can fix. A missing og:image needs an asset, so it is never "fixed" with a guessed URL.
+- **The verdict's inputs are protected.** The baseline, `crawlgate.toml`, `.github/` and the action are never shown to the model and can't be edited.
+- **Draft PRs only.** It opens a **draft** PR from a fresh `crawlgate/*` branch and never pushes to the base branch. The gate never imports the agent, and a test enforces this.
+
+### A real run
+
+Against the failing [demo PR #1](https://github.com/miracle73/crawlgate-action-demo/pull/1), `crawlgate propose --open-pr` opened [draft PR #2](https://github.com/miracle73/crawlgate-action-demo/pull/2):
+
+<img src="https://raw.githubusercontent.com/miracle73/crawlgate/main/docs/propose-pr.png" alt="PR body written by crawlgate propose" width="720">
+<img src="https://raw.githubusercontent.com/miracle73/crawlgate/main/docs/propose-gate.png" alt="crawlgate PASS on the drafted PR" width="720">
+
+The edits were correct and minimal: two lines, a byte-exact revert of the breakage (`git diff main -- site` is empty). The gate re-ran on the draft PR and passed: 0 BLOCK, 0 WARN, 0 INFO.
+
+It wasn't perfect. The PR body lists `noindex_in_sitemap` under **"Not fixed"**, but the same edit fixes it. The schema had no way to say "covered by another edit", so the model put it in `skipped`, and the PR body called it unfixed. That is misleading in exactly the place a reviewer looks. The schema now has `also_fixes`, and the prompt requires every finding to land in exactly one place. A second live run accounted for all three findings with no "Not fixed" section. PR #2 is left as it was produced.
 
 ## Limits
 
@@ -119,7 +132,7 @@ The agent proposes, code and people decide:
 - **Lighthouse needs its CLI installed separately** (`npm i -g lighthouse`). Without it, CWV budgets are skipped with an INFO finding, not silently. Lighthouse numbers are also timing-dependent, so only the over/under verdict goes in the report.
 - **Orphan detection needs a complete crawl.** If `max_depth` or `max_pages` stops the crawl early, orphan checks are switched off, because "not reached" doesn't mean "not linked".
 - **Live sites aren't hermetic.** A request that still times out after retries changes the result. Byte-stable means the same responses give the same bytes. It can't make a flaky network deterministic.
-- **`propose` hasn't been run against the live API yet.** Its validation, apply and refusal paths are tested with a stub client. Quality of the drafted fixes on real templates is unmeasured.
+- **`propose` has one real data point.** That's the demo above: a static site where the fix was a two-line revert. Templated sites (Next.js layouts, CMS-driven metadata) are harder, and fix quality there is unmeasured.
 - **JSON-LD validation covers required properties for about 25 common schema.org types.** Other types get an INFO finding (`jsonld_unknown_type`), not full schema validation.
 
 ## Usage
@@ -127,7 +140,7 @@ The agent proposes, code and people decide:
 The PyPI package is `seogate` because `crawlgate` on PyPI belongs to an unrelated search-API SDK. The command and import name are `crawlgate`.
 
 ```bash
-pip install seogate            # installs the `crawlgate` command
+pip install seogate            # `crawlgate` was taken on PyPI by an unrelated SDK; the command is still `crawlgate`
 playwright install chromium
 
 crawlgate crawl https://example.com --out report.json            # extract + findings, no gate

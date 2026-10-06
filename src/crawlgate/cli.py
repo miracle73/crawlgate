@@ -113,17 +113,22 @@ def report_cmd(path: Path, fmt: Annotated[str, typer.Option("--format", "-f", he
 def propose(path: Path, repo: Annotated[Path, typer.Option("--repo", help="site source checkout")] = Path("."),
             open_pr: Annotated[bool, typer.Option("--open-pr", help="commit to crawlgate/* branch, open draft PR")] = False,
             base: Annotated[str | None, typer.Option("--base")] = None,
+            model: Annotated[str | None, typer.Option("--model", help="OpenRouter model id")] = None,
+            config: ConfigOpt = None,
             out: Annotated[Path, typer.Option("--out", "-o")] = Path("crawlgate-fix.md")) -> None:
-    """(Optional, needs `pip install seogate[agent]`.) Draft fixes for a failing report. Never changes the verdict."""
+    """(Optional, needs `pip install seogate[agent]` + OPENROUTER_API_KEY.) Draft fixes. Never changes the verdict."""
     from . import agent
 
     r = report.load(path)
     repo = repo.resolve()
-    proposal, files = agent.propose(r, repo)
-    edits, rejected = agent.validate(proposal, repo, files)
-    body = agent.pr_body(r, edits, rejected, proposal.skipped)
-    out.write_text(body, encoding="utf-8", newline="
-")
+    try:
+        res, files = agent.propose(r, repo, model=model or load(config).agent_model)
+    except agent.ProposeError as e:
+        typer.echo(f"propose failed, nothing applied: {e}", err=True)
+        raise typer.Exit(2) from e
+    edits, rejected = agent.validate(res.proposal, repo, files)
+    body = agent.pr_body(res, edits, rejected)
+    out.write_text(body, encoding="utf-8", newline="\n")
     typer.echo(body)
     if not edits:
         typer.echo("no valid edits proposed")
