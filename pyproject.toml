@@ -30,6 +30,9 @@ dependencies = [
   "pillow>=10.3",
 ]
 
+[project.optional-dependencies]
+agent = ["anthropic>=1.0"]
+
 [project.urls]
 Homepage = "https://github.com/miracle73/crawlgate"
 Issues = "https://github.com/miracle73/crawlgate/issues"

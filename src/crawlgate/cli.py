@@ -109,5 +109,30 @@ def report_cmd(path: Path, fmt: Annotated[str, typer.Option("--format", "-f", he
     typer.echo(str(dest))
 
 
+@app.command()
+def propose(path: Path, repo: Annotated[Path, typer.Option("--repo", help="site source checkout")] = Path("."),
+            open_pr: Annotated[bool, typer.Option("--open-pr", help="commit to crawlgate/* branch, open draft PR")] = False,
+            base: Annotated[str | None, typer.Option("--base")] = None,
+            out: Annotated[Path, typer.Option("--out", "-o")] = Path("crawlgate-fix.md")) -> None:
+    """(Optional, needs `pip install seogate[agent]`.) Draft fixes for a failing report. Never changes the verdict."""
+    from . import agent
+
+    r = report.load(path)
+    repo = repo.resolve()
+    proposal, files = agent.propose(r, repo)
+    edits, rejected = agent.validate(proposal, repo, files)
+    body = agent.pr_body(r, edits, rejected, proposal.skipped)
+    out.write_text(body, encoding="utf-8", newline="
+")
+    typer.echo(body)
+    if not edits:
+        typer.echo("no valid edits proposed")
+        return
+    touched = agent.apply(edits, repo)
+    typer.echo(f"edited: {', '.join(touched)}")
+    if open_pr:
+        typer.echo(agent.open_pr(repo, touched, body, base))
+
+
 if __name__ == "__main__":
     app()

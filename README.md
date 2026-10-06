@@ -96,12 +96,30 @@ The verify pass, which status-checks URLs the crawl references but doesn't expan
 
 Now the budget is explicit (`max_verify`) and prioritised by what matters most: hreflang and canonical targets first, then internal links, then sitemap entries. Running out of budget is itself a reported WARN (`verify_truncated`). The same discipline applies in the other direction, to real noise. tipmaster's HTML changes on every request because of per-request Sentry `sentry-trace` and `baggage` meta tags. A naive HTML diff would flag every page on every run and teach people to ignore it. crawlgate diffs a typed SEO surface, not markup, so those tags never reach the report.
 
+## Optional: drafted fixes (`crawlgate propose`)
+
+This is separate from the gate. It reads a failing `report.json`, finds the source files behind the failing pages, and asks Claude (`claude-opus-5-5`, structured output) for minimal edits: a corrected canonical, a removed stray `noindex`, a valid JSON-LD block.
+
+```bash
+pip install "seogate[agent]"
+crawlgate propose report.json --repo .              # writes crawlgate-fix.md, edits the working tree
+crawlgate propose report.json --repo . --open-pr    # commits to a crawlgate/* branch, opens a draft PR
+```
+
+The agent proposes, code and people decide:
+
+- Every edit is checked in code before it touches a file. It must target a file the model was shown, its `old_string` must match exactly once, and the rule must be text-fixable. A missing og:image needs an asset, so it is never "fixed" with a guessed URL.
+- The baseline, `crawlgate.toml`, `.github/` and the action are never shown to the model and can't be edited.
+- It opens a **draft** PR from a fresh `crawlgate/*` branch and never pushes to the base branch. The crawlgate check re-runs on that PR and decides whether the fix worked.
+- The gate never imports the agent. A test enforces this.
+
 ## Limits
 
 - **The demo workflow serves files on localhost, not a real preview deploy.** [crawlgate-action-demo](https://github.com/miracle73/crawlgate-action-demo) runs `python -m http.server` on the PR checkout. In real use, point `url:` at your Vercel, Netlify or Cloudflare preview, and set `production_hosts` so canonicals pointing at production aren't flagged as foreign.
 - **Lighthouse needs its CLI installed separately** (`npm i -g lighthouse`). Without it, CWV budgets are skipped with an INFO finding, not silently. Lighthouse numbers are also timing-dependent, so only the over/under verdict goes in the report.
 - **Orphan detection needs a complete crawl.** If `max_depth` or `max_pages` stops the crawl early, orphan checks are switched off, because "not reached" doesn't mean "not linked".
 - **Live sites aren't hermetic.** A request that still times out after retries changes the result. Byte-stable means the same responses give the same bytes. It can't make a flaky network deterministic.
+- **`propose` hasn't been run against the live API yet.** Its validation, apply and refusal paths are tested with a stub client. Quality of the drafted fixes on real templates is unmeasured.
 - **JSON-LD validation covers required properties for about 25 common schema.org types.** Other types get an INFO finding (`jsonld_unknown_type`), not full schema validation.
 
 ## Usage
