@@ -1,0 +1,21 @@
+[crawlgate]
+max_depth = 2
+max_pages = 300
+concurrency = 4
+rate_per_sec = 5
+render = true
+production_hosts = ["tipmaster.net"]      # canonicals must point here
+noindex_allowed = ["/signin", "/signup"]  # routes that are meant to be noindex
+ignore_x_robots_tag = false               # true for previews that send X-Robots-Tag: noindex
+exclude = ['[?]']                          # skip query-string variants
+
+# Upgrades only. A downgrade (e.g. noindex_in_sitemap = "info") is ignored and logged.
+[crawlgate.severity]
+og_image_missing = "block"
+
+[crawlgate.lighthouse]
+enabled = false
+urls = 3
+lcp_ms = 2500
+cls = 0.1
+tbt_ms = 200

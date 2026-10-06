@@ -1,0 +1,60 @@
+name: crawlgate
+description: SEO regression gate. Crawls a preview deployment, diffs against the committed baseline, blocks the PR on regressions.
+inputs:
+  url:
+    description: Preview deployment URL to check
+    required: true
+  baseline:
+    description: Path to committed baseline JSON
+    default: crawlgate.baseline.json
+  fail-on:
+    description: block | warn | info | none
+    default: block
+  config:
+    description: Path to crawlgate.toml
+    default: crawlgate.toml
+  args:
+    description: Extra CLI args (e.g. --depth 2 --max-pages 200)
+    default: ""
+  comment:
+    description: Post / update a PR comment with the results
+    default: "true"
+outputs:
+  verdict:
+    description: pass | warn | fail
+    value: ${{ steps.check.outputs.verdict }}
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@v6
+    - name: Install crawlgate
+      shell: bash
+      run: |
+        uv tool install "${{ github.action_path }}"
+        uvx --from "${{ github.action_path }}" playwright install --with-deps chromium
+    - name: Run gate
+      id: check
+      shell: bash
+      env:
+        PYTHONIOENCODING: utf-8
+      run: |
+        cfg=""; [ -f "${{ inputs.config }}" ] && cfg="--config ${{ inputs.config }}"
+        set +e
+        crawlgate check "${{ inputs.url }}" --baseline "${{ inputs.baseline }}" --fail-on "${{ inputs.fail-on }}" \
+          --out crawlgate-report.json $cfg ${{ inputs.args }}
+        code=$?
+        set -e
+        echo "verdict=$(python3 -c "import json;print(json.load(open('crawlgate-report.json',encoding='utf-8'))['verdict'])")" >> "$GITHUB_OUTPUT"
+        cat crawlgate-report.md >> "$GITHUB_STEP_SUMMARY"
+        echo "code=$code" >> "$GITHUB_OUTPUT"
+    - name: Comment on PR
+      if: inputs.comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh pr comment "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" \
+          --body-file crawlgate-report.md --edit-last --create-if-none
+    - name: Set check status
+      shell: bash
+      run: exit ${{ steps.check.outputs.code }}

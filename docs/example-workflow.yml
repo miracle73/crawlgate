@@ -1,0 +1,20 @@
+# Example: gate every PR against its preview deployment.
+name: crawlgate
+on:
+  pull_request:
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  seo-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Replace with however your host exposes the preview URL (Vercel, Netlify, Cloudflare Pages...).
+      - id: preview
+        run: echo "url=https://pr-${{ github.event.pull_request.number }}.preview.example.com" >> "$GITHUB_OUTPUT"
+      - uses: ./
+        with:
+          url: ${{ steps.preview.outputs.url }}
+          baseline: crawlgate.baseline.json
+          fail-on: block
